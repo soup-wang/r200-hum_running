@@ -28,13 +28,13 @@ log_debug: False
 print_log_debug: False
 
 # kml 文件名 需要 将文件放在同huming目录下
-kml_name: xinhongtest-9.kml
+kml_name: xinhongtest-14.kml
 
 # 最小航点距离，当船距离航点距离最小距离时，认为已经到达航点,单位m
-min_waypoint_distance: 10
+min_waypoint_distance: 8
 
 # 执行过桥最近距离
-min_bridge_distance: 15
+min_bridge_distance: 20
 
 # 地面速度
-ground_speed: 0.5
+ground_speed: 0.42

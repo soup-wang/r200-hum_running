@@ -191,6 +191,12 @@ class Px4Controller:
 
 
     def start(self, debug=False):
+        for i in range(10):
+            #  解除锁定
+            self.arm_state = self.arm()
+            self.manual_state = self.manual()
+            time.sleep(0.2)
+        r = rospy.Rate(10)  # 设置数据发送频率为10hz
         rcmsg = OverrideRCIn()
         rcmsg.channels = [65535, 65535, 65535,
                           65535, 65535, 65535, 65535, 65535]
@@ -202,7 +208,6 @@ class Px4Controller:
         # 0 向桥首个航点驶入
         # 1 进入直行状态
         # 2 过桥完成,前往过桥后与当前航向不超过70度的航点
-        bridge_status = 3
         hum_msg = HumRunning()
         
         first_arm = True
@@ -214,10 +219,11 @@ class Px4Controller:
             if self.arm_state and self.manual_state and (rospy.is_shutdown() is False):
                 if self.current_gps != None and len(self.rc_in) > 2 and self.rc_in[5] > 1500:
                     if first_cortron_state != 2:
-                        rcmsg.channels[2] = 1850
+                        rcmsg.channels[2] = 1800
 
                         self.log.logger.info("延边模式")
                         # 首次切入延边状态进入前往地一个航点
+                        bridge_status = 3
                         first_cortron_state = 2
                         waypoint_index = 0
                         waypoint = self.current_gps
@@ -232,11 +238,18 @@ class Px4Controller:
                     hum_msg.currenrYaw = self.yaw
 
                     if bridge_status == 3:
-                        min_bridge_waypoints = self.get_min_bridge()
+                        min_bridge_waypoints ,bridge_sta = self.get_min_bridge()
+                        
                         # 获取距离当前位置与最近桥的距离以及桥本身航点
                         if len(min_bridge_waypoints) > 0:
                             bridge_heading = gps_utiles.gps_get_angle(
                                 min_bridge_waypoints[0], min_bridge_waypoints[-1])
+                            
+                            if bridge_sta :
+                                bridge_heading += 8
+                            else :
+                                bridge_heading -= 8
+                            
                             bridge_distance = gps_utiles.gps_get_distance(
                                 min_bridge_waypoints[0], min_bridge_waypoints[-1])
                             self.log.logger.info(
@@ -264,6 +277,31 @@ class Px4Controller:
                                 self.log.logger.info("任务结束")
                                 waypoint_index = 0
                                 waypoint = self.current_gps
+                        
+                        if not self.config.yaw_PID_debug :
+                            self.get_dist_parallel_yaw()
+                            # 判断点云是否符合沿岸要求，符合要求是时进行沿岸行走,不符合要求航向向下个航点行驶,或者进入调试模式下不进入延边模式
+                            if len(self.all_points) > 130 :
+                                self.get_line_slope()
+                                if self.left_dist != None and self.left_parallel_yaw != None and self.left_dist > 0.5:
+                                    hum_msg.leftDist = self.left_dist
+                                    hum_msg.leftParallelYaw = self.left_parallel_yaw
+                                    
+                                    # 根据与岸的距离不断调整 yaw 是其不断逼近想要的距离
+                                    self.set_dist_pid_control(
+                                        self.config.except_dist, self.left_dist, self.left_parallel_yaw, rcmsg,hum_msg)
+                                else:
+                                    self.left_dist = None 
+                                self.left_parallel_yaw = None
+                            else:
+                                self.left_dist = None 
+                                self.left_parallel_yaw = None
+
+                                # 向航点航向行驶
+                                self.set_yaw_pid_control(self.current_heading, rcmsg,hum_msg)
+                                # self.log.logger.info(
+                                #     "you" +  str(self.current_heading))
+                                time.sleep(0.1)
 
 
                     # 若当前位置距离桥第一个点小于最小航点距离则进行
@@ -275,22 +313,35 @@ class Px4Controller:
 
                         self.set_yaw_pid_control(
                             current_bridge_heading, rcmsg ,hum_msg)
-                        if current_bridge_distance < self.config.min_waypoint_distance:
+                        time.sleep(0.1)
+
+                        if current_bridge_distance < 5:
+                            self.log.logger.info(
+                                "到达桥起始点" +  str(self.current_gps))
                             bridge_status = 1
                             start_time = time.time()
 
                     elif bridge_status == 1:
 
                         self.set_yaw_pid_control(bridge_heading, rcmsg ,hum_msg)
+                        time.sleep(0.1)
+
+                        # self.log.logger.info(
+                        #         "桥航向" +  str(bridge_heading))
                         bridge_time = time.time()-start_time
-                        if bridge_time > (bridge_distance +5) / self.config.ground_speed:
+                        if bridge_time > (bridge_distance ) / self.config.ground_speed:
+                            dist = gps_utiles.gps_get_distance( self.current_gps, min_bridge_waypoints[1] )
+                            heading = gps_utiles.gps_get_angle( self.current_gps, min_bridge_waypoints[1])
+                            diff_yaw = angle_utils.angle_min_different_0_360(heading,self.yaw)
+                            self.log.logger.info(
+                                "结束距离桥实际终点"+str(dist)+"米,当前航点与桥终点角度为:"+str(diff_yaw))
                             self.log.logger.info(
                                 "已通过桥,耗时"+str(bridge_time)+"秒,桥末尾点: "+str(min_bridge_waypoints[-1]))
                             # 确定通过桥梁
                             bridge_status = 2
 
                     elif bridge_status == 2:
-                        if waypoint_index < len(self.kml_dict["left"])-1 and angle_utils.angle_different_0_360(self.current_heading, self.yaw) > 90:
+                        if waypoint_index < len(self.kml_dict["left"])-1 and angle_utils.angle_min_different_0_360(self.current_heading, self.yaw) > 120:
                             waypoint = self.kml_dict["left"][waypoint_index]
                             self.log.logger.info(
                                 "跳过第"+str(waypoint_index)+"个航点:"+str(waypoint))
@@ -302,33 +353,14 @@ class Px4Controller:
 
                     # self.log.logger.info( "current_heading: " + str(self.current_heading))
                     # print(len(self.all_points))
-                    if not self.config.yaw_PID_debug and bridge_status == 3:
-                        self.get_dist_parallel_yaw()
-                        # 判断点云是否符合沿岸要求，符合要求是时进行沿岸行走,不符合要求航向向下个航点行驶,或者进入调试模式下不进入延边模式
-                        if len(self.all_points) > 130 :
-                            self.get_line_slope()
-                            if self.left_dist != None and self.left_parallel_yaw != None and self.left_dist > 0.5:
-                                hum_msg.leftDist = self.left_dist
-                                hum_msg.leftParallelYaw = self.left_parallel_yaw
-                                
-                                # 根据与岸的距离不断调整 yaw 是其不断逼近想要的距离
-                                self.set_dist_pid_control(
-                                    self.config.except_dist, self.left_dist, self.left_parallel_yaw, rcmsg,hum_msg)
-                            else:
-                                self.left_dist = None 
-                            self.left_parallel_yaw = None
-                        else:
-                            self.left_dist = None 
-                            self.left_parallel_yaw = None
-
-                            # 向航点航向行驶
-                            self.set_yaw_pid_control(self.current_heading, rcmsg,hum_msg)
-                            time.sleep(0.1)
+         
                     else:
                         self.left_dist = None 
                         self.left_parallel_yaw = None
                         # 向航点航向行驶
                         self.set_yaw_pid_control(self.current_heading, rcmsg,hum_msg)
+                        # self.log.logger.info(
+                        #         "wu" +  str(self.current_heading))
                         time.sleep(0.1)
                 # 如果切换到遥控模式
                 elif len(self.rc_in) > 2 and self.rc_in[5] < 1500:
@@ -367,6 +399,7 @@ class Px4Controller:
         current_bridge_distance = self.config.min_bridge_distance
         min_bridge_waypoints = []
         bridge_heading = None
+        bridge_status = True
         # 判断桥的的位置距离有多远,返回船最近距离桥的最近点且与下个航点的的航向,与当前位置与桥的航向超过180度时,忽略
         for key in self.kml_dict:
             if "bridge" in key:
@@ -381,12 +414,16 @@ class Px4Controller:
                 if start_bridge_distance < current_bridge_distance:
                     current_bridge_distance = start_bridge_distance
                     min_bridge_waypoints = self.kml_dict[key]
+                    bridge_status = True
+
                     bridge_heading = gps_utiles.gps_get_angle(
                         self.kml_dict[key][0], self.kml_dict[key][-1])
 
                 if end_bridge_distance < current_bridge_distance:
                     current_bridge_distance = end_bridge_distance
                     min_bridge_waypoints = self.kml_dict[key][::-1]
+                    bridge_status = False
+
                     bridge_heading = gps_utiles.gps_get_angle(
                         self.kml_dict[key][-1], self.kml_dict[key][0])
 
@@ -394,7 +431,7 @@ class Px4Controller:
             min_bridge_waypoints = []
 
         # 返回当前位置与桥的航点位置
-        return min_bridge_waypoints
+        return min_bridge_waypoints ,bridge_status
 
     def read_kml_file(self, kml_path):
         '''
@@ -588,7 +625,8 @@ class Px4Controller:
         rcmsg   设置通道值 
         '''
         hum_msg.exceptYaw = except_yaw
-
+        # self.log.logger.info(
+        #                         "期望" +  str(except_yaw))
         self.yaw_pid.SetPoint = except_yaw
         self.yaw_pid.yaw_update(float(self.yaw))  # 针对0 -360 yaw 值针对 设置pid
         self.yaw_pid.sample_time = 0.1  # 采样间隔
@@ -754,6 +792,7 @@ class Px4Controller:
         self.imu = msg
         heading = self.q2yaw(self.imu.orientation)
         self.yaw = (-heading / math.pi * 180.0 + 90) % 360
+        # self.log.logger.info(self.yaw)
         marker = self.create_marker() 
         self.marker_pub.publish(marker)
           # 将航线发布出来
@@ -855,9 +894,30 @@ class Px4Controller:
     # 速度回调函数
 
     def vfr_hub_callback(self, msg):
-        # self.config.ground_speed = msg.groundspeed
+        # speed_dist =0
+        # self.config.ground_speed = msg.groundspeed + speed_dist
         pass
 
+    def manual(self):
+        if self.flightModeService(custom_mode='MANUAL'):
+            return True
+        else:
+            print("Vechile MANUAL failed")
+            return False
+
+    def arm(self):
+        if self.armService(True):
+            return True
+        else:
+            print("Vehicle arming failed!")
+            return False
+
+    def disarm(self):
+        if self.armService(False):
+            return True
+        else:
+            print("Vehicle disarming failed!")
+            return False
     def GPS_callback(self, msg):
         '''
         获取GPS 信息

@@ -30,7 +30,7 @@
 More information about PID Controller: http://en.wikipedia.org/wiki/PID_controller
 """
 import time
-
+import angle_utils
 class PID:
     """PID Controller
     """
@@ -104,10 +104,10 @@ class PID:
            Test PID with Kp=1.2, Ki=1, Kd=0.001 (test_pid.py)
         """
         error = self.SetPoint - feedback_value
-
-        if error > 180 :
-            error = error - 360 
-        elif error < -180 :
+        
+        if error > 270 :
+            error = error - 360
+        elif error < -90 :
             error = error + 360 
 
         self.current_time = time.time()
